@@ -1,0 +1,136 @@
+---
+############
+# packages #
+############
+
+apt_packages:
+  - 'cron'
+  - 'curl'
+  - 'apt-transport-https'
+  - 'ca-certificates'
+  - 'software-properties-common'
+  - 'python3-pip'
+  - 'python3-setuptools'
+  - 'docker-ce'
+
+
+##########
+# docker #
+##########
+
+docker_path: "/opt/homeserver/docker"
+scripts_path: "/opt/homeserver/scripts"
+docker_venv: "{{ docker_path }}/venv"
+
+base_path: "{{ docker_user.home }}"
+user_dirs:
+  - cloud/app/config
+  - cloud/db/backup
+  - cloud/redis
+  - binance/data
+  - binance/logs
+  - photoprism/app
+  - photoprism/db/backup
+  - photoprism/var
+  - borgbackup/mnt
+  - offlineimap/cache
+  - offlineimap/mails
+  - data
+  - pics
+  - docs
+  - code
+  - status
+  - calcardbackup
+  - ftp
+  - rsync
+
+user_external_dirs:
+  - rsync
+
+user_files:
+  - cloud/redis-session.ini
+
+docker_networks:
+  - "proxy"
+  - "watchtower"
+  - "binance"
+  - "hosting"
+  - "status"
+
+
+########
+# cron #
+########
+
+compose_cmd: "{{ docker_venv }}/bin/docker-compose -f {{ docker_path }}/docker-compose.yml"
+
+cron_jobs:
+  - name: ddns
+    minute: "*/5"
+    job: "{{ compose_cmd }} up -d ddns"
+  - name: offlineimap
+    hour: 12
+    minute: 0
+    job: "{{ compose_cmd }} up -d offlineimap"
+  - name: calcardbackup
+    hour: 12
+    minute: 15
+    job: "{{ compose_cmd }} up -d calcardbackup"
+  - name: ftp
+    day: 2
+    hour: 12
+    minute: 30
+    job: "{{ compose_cmd }} up -d ftp"
+  - name: watchtower
+    hour: 7
+    minute: 15
+    job: "{{ compose_cmd }} up -d watchtower"
+  - name: cloud-db-backup
+    hour: 19
+    minute: 0
+    job: "{{ compose_cmd }} up -d cloud-db-backup"
+  - name: photoprism-db-backup
+    hour: 19
+    minute: 15
+    job: "{{ compose_cmd }} up -d photoprism-db-backup"
+  - name: borgbackup
+    hour: 19
+    minute: 30
+    job: "{{ compose_cmd }} up -d borgbackup"
+  - name: docker-status
+    minute: "*/2"
+    job: "{{ scripts_path }}/docker_status.sh"
+  - name: disc-usage
+    hour: 7
+    minute: 30
+    job: "{{ scripts_path }}/disk_usage.sh"
+  - name: docker-build
+    hour: 7
+    minute: 45
+    job: "{{ compose_cmd }} --profile cronjob --profile optional build --pull"
+  - name: docker-prune
+    hour: 9
+    minute: 0
+    job: "docker image prune -f"
+
+
+###########
+## config #
+###########
+
+cloud_apps_enable:
+  - contacts
+  - calendar
+  - notes
+  - files_external
+  - tasks
+  - twofactor_totp
+
+cloud_apps_disable:
+  - recommendations
+  - survey_client
+  - firstrunwizard
+  - circles
+  - support
+  - accessibility
+  - comments

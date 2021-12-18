@@ -1,0 +1,11 @@
+# to be defined as `hosts.yml` and to be encrypted using
+# ansible-vault encrypt --vault-pass-file vault_pass.txt ansible/hosts.yml
+
+server:
+  hosts:
+    host1.example.com:22
+  vars:
+    ansible_ssh_pass: password
+    ansible_user: admin
+    ansible_become_password: password
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no"

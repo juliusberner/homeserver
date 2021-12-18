@@ -1,0 +1,60 @@
+version: '3.5'
+
+x-defaults: &ansible_vault_password
+  ANSIBLE_VAULT_PASSWORD: ${ANSIBLE_VAULT_PASSWORD:?Choose vault password.}
+
+
+services:
+  ######################## ANSIBLE-VAULT ########################
+  vault-encrypt: &vault
+    # ansible-vault changes the owner and group of the encrypted files according to the current user
+    user: ${DOCKER_UID:-0}:${DOCKER_GID:-0}
+    build:
+      context: ansible-docker
+      target: ansible-vault
+    command: ["encrypt", "ansible/hosts.yml", "ansible/group_vars/all/vault.yml"]
+    container_name: vault-encrypt
+    volumes:
+      - ./ansible:/app/ansible
+    environment: *ansible_vault_password
+
+  vault-decrypt:
+    <<: *vault
+    command: ["decrypt", "ansible/hosts.yml", "ansible/group_vars/all/vault.yml"]
+    container_name: vault-decrypt
+
+  ######################## ANSIBLE-PLAYBOOK ########################
+  ansible-install:
+    build:
+      context: ansible-docker
+      target: ansible-playbook
+    command: ["-i", "ansible/hosts.yml", "ansible/site.yml"]
+    container_name: ansible-install
+    volumes:
+      - ./ansible:/app/ansible:ro
+      # map ssh keys for install
+      - ${HOME}/.ssh/id_rsa.pub:/root/.ssh/id_rsa.pub:ro
+      - ${HOME}/.ssh/id_rsa:/root/.ssh/id_rsa:ro
+    environment: *ansible_vault_password
+
+  ansible-test:
+    build:
+      context: ansible-docker
+      target: local-ansible-playbook
+    command:
+      - "-e"
+      - "base_path=${TMP_FOLDER:-/tmp/docker} test=true"
+      - "ansible/site.yml"
+    container_name: ansible-test
+    volumes:
+      - ./ansible:/app/ansible:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      # temporary storage for docker containers outputs
+      - ${TMP_FOLDER:-/tmp/docker}:${TMP_FOLDER:-/tmp/docker}
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      # test ssh from localhost
+      - "127.0.0.1:22:22"
+    environment: *ansible_vault_password

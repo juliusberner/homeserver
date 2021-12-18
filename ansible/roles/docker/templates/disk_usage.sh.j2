@@ -1,0 +1,6 @@
+#!/bin/bash
+DU_FILE={{ base_path }}/status/disk-usage.txt
+OWNER={{ docker_user.name }}:{{ docker_user.group }}
+
+du -h --max-depth=1 /home/server | sort -h > $DU_FILE
+chown $OWNER $DU_FILE

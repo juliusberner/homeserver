@@ -1,0 +1,16 @@
+[Unit]
+Description=Docker Compose Service
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory={{ docker_path }}
+ExecStart=docker-compose up -d
+ExecStop=docker-compose stop --time 20
+TimeoutStartSec=0
+TimeoutStopSec=25
+
+[Install]
+WantedBy=multi-user.target

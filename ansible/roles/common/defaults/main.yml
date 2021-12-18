@@ -1,0 +1,50 @@
+---
+############
+# packages #
+############
+
+apt_repos: [ 'ppa:linrunner/tlp' ]
+apt_packages: [ 'nano', 'ufw', 'cron', 'tlp' ]
+
+
+#######
+# ssh #
+#######
+
+sshd_config:
+  PermitRootLogin: "no"
+  PasswordAuthentication: "no"
+  PermitEmptyPasswords: "no"
+  PubkeyAuthentication: "yes"
+  ChallengeResponseAuthentication: "no"
+  MaxAuthTries: 3
+  UsePAM: "yes"
+  AllowUsers: "{{ admin_user.name }}"
+
+ssh_local_key: "{{ lookup('file', lookup('env','HOME') + '/.ssh/id_rsa.pub', errors='warn') }}"
+
+
+####################
+# power management #
+####################
+
+tlp_config:
+  WIFI_PWR_ON_BAT: "off"
+
+logind_config:
+  HandleLidSwitchDocked: "ignore"
+  HandleLidSwitch: "ignore"
+  LidSwitchIgnoreInhibited: "no"
+
+
+###########
+# scripts #
+###########
+
+scripts_path: "/opt/homeserver/scripts"
+
+cron_jobs:
+  - name: auto-suspend
+    hour: 0
+    minute: 0
+    job: "{{ scripts_path }}/suspend_until.sh 07:00"

@@ -1,0 +1,55 @@
+# # to be defined as `vault.yml` and to be encrypted using
+# # ansible-vault encrypt --vault-pass-file vault_pass.txt ansible/group_vars/all/vault.yml
+#
+# # general
+# vault_external_media_path: "/media/xyz"
+# vault_timezone: "Europe/London"
+# vault_ubuntu_advantage_token: "abcdefghijklmnopqrstuvwxyz1234"
+# # binance (apprise)
+# vault_telegram_url: "tgram://123456789:AABx8iXjE5C-vG4SDhf6ARgdFgxYxhuHb4A/-606743502"
+# # borgbackup
+# vault_borg_passphrase: "password"
+# # offlineimap
+# vault_mail_host: "example-host.com"
+# vault_mail_user: "example-user"
+# vault_mail_password: "example-password"
+# # ddns
+# vault_ddns_server: "example-server.com"
+# vault_ddns_users: "ddns-user1 ddns-user2"
+# vault_ddns_passwords: "password1 password2"
+# vault_ddns_domains: "example1.com example2.com"
+# # ftp
+# vault_ftp_host: "example-host.com"
+# vault_ftp_user: "ftp-user"
+# vault_ftp_password: "password"
+# # status
+# vault_telegram_bot_id: "botid"
+# vault_telegram_chat_id: "1234"
+# vault_telegram_user_id: "1234"
+# vault_domains: "example1.com example2.com example3.com"
+# # binance
+# vault_binance_current_coin: "ATOM"
+# vault_binance_api_key: "abcdefghijklmnopqrstuvwxyz1234"
+# vault_binance_api_secret_key: "abcdefghijklmnopqrstuvwxyz1234"
+# # proxy
+# vault_default_mail: "mail@example.com"
+# # photoprism
+# vault_photoprism_admin_password: "password"
+# vault_photoprism_domain: "example2.com"
+# vault_photoprism_mysql_root_password: "root-password"
+# vault_photoprism_mysql_database: "photoprism"
+# vault_photoprism_mysql_user: "photoprism-user"
+# vault_photoprism_mysql_password: "password"
+# # cloud
+# vault_cloud_domain: "example1.com"
+# vault_cloud_admin_user: "user"
+# vault_cloud_admin_password: "password"
+# vault_cloud_redis_host_password: "password"
+# vault_cloud_mysql_root_password: "root-password"
+# vault_cloud_mysql_database: "cloud"
+# vault_cloud_mysql_user: "cloud-user"
+# vault_cloud_mysql_password: "password"
+# vault_cloud_mail_address: "mail@example.com"
+# vault_cloud_mail_smtphost: "example-host.com"
+# vault_cloud_mail_username: "example-user"
+# vault_cloud_mail_password: "example-password"

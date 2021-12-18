@@ -1,0 +1,575 @@
+version: '3.5'
+
+# Docker Compose config file based on:
+#
+# Photoprism: https://docs.photoprism.org/getting-started/docker-compose/
+# Nextcloud: https://gist.github.com/robertoschwald/f852803908edda5d9360bbeabb647cbb
+# Nextcloud: https://github.com/nextcloud/docker
+# Proxy: https://github.com/nginx-proxy/acme-companion
+# Proxy: https://github.com/evertramos/nginx-proxy-automation
+# Proxy: https://github.com/buchdag/letsencrypt-nginx-proxy-companion-compose
+#
+# Example commands
+#
+# DOCKER COMPOSE COMMAND REFERENCE
+# --------------------------------------------------------------------------
+# Start    | docker-compose up -d
+# Stop     | docker-compose stop
+# Stop     | docker-compose stop container_name
+# Update   | docker-compose pull
+# Logs     | docker-compose logs --tail=25 -f
+# Logs     | docker-compose logs container_name --tail=25 -f
+# Terminal | docker-compose exec photoprism bash
+# --------------------------------------------------------------------------
+
+
+##############
+## NETWORKS ##
+##############
+
+networks:
+  # external
+  proxy:
+    external: true
+  watchtower:
+    external: true
+  binance:
+    external: true
+  hosting:
+    external: true
+  status:
+    external: true
+  # internal
+  cloud:
+    internal: true
+  photoprism:
+    internal: true
+
+###################
+## NAMED VOLUMES ##
+###################
+
+volumes:
+  conf:
+  vhost:
+  html:
+  dhparam:
+  certs:
+  acme:
+
+##################
+## YAML ANCHORS ##
+##################
+
+# see https://docs.docker.com/compose/compose-file/compose-file-v3/#extension-fields
+x-defaults: &defaults
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "1M"
+      max-file: "10"
+
+  cap_drop: ["ALL"]
+
+  restart: on-failure:3
+
+x-disable-watchtower: &disable-watchtower
+  com.centurylinklabs.watchtower.enable: "false"
+
+##############
+## SERVICES ##
+##############
+
+services:
+  ######################## CRONJOBS ########################
+  # watchtower upgrades services automatically
+  watchtower:
+    profiles: ["cronjob"]
+    image: containrrr/watchtower
+    container_name: watchtower
+    environment:
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_INCLUDE_STOPPED: "true"
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      WATCHTOWER_RUN_ONCE: "true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - watchtower
+    <<: *defaults
+
+  # borgbackup
+  # see https://github.com/borgbackup/borg
+  borgbackup: &default-borgbackup
+    profiles: ["cronjob"]
+    build: borgbackup
+    container_name: borgbackup
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    volumes:
+      # cache and backup target
+      - "{{ base_path }}/borgbackup:/app/borgbackup"
+      # backup source
+      - "{{ base_path }}:/app/data:ro"
+      # map userid -> username
+      - /etc/passwd:/etc/passwd:ro
+    environment:
+      BORG_CREATE_OPTIONS: "--compression auto,zstd,6 --exclude-caches"
+      BORG_PRUNE_OPTIONS: "--keep-daily=7 --keep-weekly=4 --keep-monthly=12"
+      # to extract
+      # BORG_CUSTOM_CMD: "extract -v --list ::yyyy-mm-dd data/folder/file"
+      BORG_PASSPHRASE: "{{ vault_borg_passphrase }}"
+    network_mode: "none"
+    labels: *disable-watchtower
+    <<: *defaults
+
+  # borgbackup list
+  borgbackup-ls:
+    <<: *default-borgbackup
+    profiles: ["optional"]
+    container_name: borgbackup-ls
+    environment:
+      # see https://borgbackup.readthedocs.io/en/stable/usage/general.html
+      # BORG_RELOCATED_REPO_ACCESS_IS_OK: "yes"
+      BORG_SKIP_CHECK: "true"
+      BORG_CUSTOM_CMD: "list -v"
+      BORG_PASSPHRASE: "{{ vault_borg_passphrase }}"
+
+  # borgbackup mount
+  borgbackup-mnt: &default-borgbackup-mnt
+    <<: *default-borgbackup
+    command: ["borg", "mount", "-v", "-f", "-o", "allow_other", "::", "/app/borgbackup/mnt"]
+    profiles: ["optional"]
+    container_name: borgbackup-mnt
+    # see https://stackoverflow.com/questions/43687025/s3-mounted-inside-the-container-how-to-expose-it-to-the-host
+    volumes:
+      - "{{ base_path }}/borgbackup:/app/borgbackup"
+      - "{{ base_path }}/borgbackup/mnt:/app/borgbackup/mnt:shared"
+      - /etc/passwd:/etc/passwd:ro
+    environment:
+      BORG_PASSPHRASE: "{{ vault_borg_passphrase }}"
+    # see https://blog.nashcom.de/nashcomblog.nsf/dx/running-borgbackup-restore-on-docker.htm
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - "/dev/fuse"
+    security_opt:
+      - apparmor:unconfined
+    restart: "no"
+    # see https://borgbackup.readthedocs.io/en/stable/usage/mount.html
+    stop_signal: SIGINT
+
+  # download imap
+  offlineimap:
+    profiles: ["cronjob"]
+    build: offlineimap
+    container_name: offlineimap
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    volumes:
+      - "{{ base_path }}/offlineimap/mails:/app/mails"
+      # cache
+      - "{{ base_path }}/offlineimap/cache:/app/offlineimap"
+    environment:
+      MAIL_HOST: "{{ mail_host }}"
+      MAIL_USER: "{{ mail_user }}"
+      MAIL_PW: "{{ mail_password }}"
+    networks:
+      - hosting
+    labels: *disable-watchtower
+    <<: *defaults
+
+  # store calendar and contacts from nextcloud for convenience
+  # see https://codeberg.org/BernieO/calcardbackup
+  calcardbackup:
+    profiles: ["cronjob"]
+    build: calcardbackup
+    command: ["cloud", "--output", "backup", "--remove", "1", "--include-shares"]
+    container_name: calcardbackup
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    depends_on:
+      - cloud-db
+    volumes:
+      - "{{ base_path }}/calcardbackup:/app/backup"
+      - "{{ base_path }}/cloud/app/config:/app/cloud/config:ro"
+    networks:
+      - cloud
+    labels: *disable-watchtower
+    <<: *defaults
+
+  # update dynamic DNS
+  ddns:
+    profiles: ["cronjob"]
+    build: ddns
+    container_name: ddns
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    environment:
+      DDNS_USER_AGENT: "DDNS-Updater"
+      DDNS_SERVER: "{{ ddns_server }}"
+      # space separated lists of usernames, passwords, and domains
+      DDNS_USERS: "{{ ddns_users }}"
+      DDNS_PASSWORDS: "{{ ddns_passwords }}"
+      # only used for logging
+      DDNS_DOMAINS: "{{ ddns_domains }}"
+    networks:
+      - hosting
+    labels: *disable-watchtower
+    <<: *defaults
+
+  # backup webspace via FTP
+  ftp:
+    profiles: ["cronjob"]
+    build: ftp
+    container_name: ftp
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    volumes:
+      - "{{ base_path }}/ftp:/app/backup"
+    environment:
+      FTP_REMOTE_DIR: "."
+      FTP_HOST: "{{ ftp_host }}"
+      FTP_USER: "{{ ftp_user }}"
+      FTP_PASSWORD: "{{ ftp_password }}"
+    networks:
+      - hosting
+    labels: *disable-watchtower
+    <<: *defaults
+
+  # cloud-db backup
+  cloud-db-backup: &default-db-backup
+    profiles: ["cronjob"]
+    build: db-backup
+    # to restore cloud-yyyy-mm-dd.sql.gz uncomment the following line
+    # command: ["bash", "restore.sh", "backup/cloud-yyyy-mm-dd.sql.gz"]
+    container_name: cloud-db-backup
+    depends_on:
+      - cloud-db
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    volumes:
+      - "{{ base_path }}/cloud/db/backup:/app/backup"
+    environment: &default-db-backup-env
+      GZIP_LEVEL: "6"
+      MYSQLDUMP_OPTS: "--single-transaction"
+      MYSQL_HOST: cloud-db
+      REMOVE: "0"
+      MYSQL_DATABASE: "{{ cloud_mysql_database }}"
+      MYSQL_USER: "{{ cloud_mysql_user }}"
+      MYSQL_PASSWORD: "{{ cloud_mysql_password }}"
+    networks:
+      - cloud
+    labels: *disable-watchtower
+    <<: *defaults
+
+  # photoprism-db backup
+  photoprism-db-backup:
+    <<: *default-db-backup
+    # to restore cloud-yyyy-mm-dd.sql.gz uncomment the following line
+    # command: ["bash", "restore.sh", "backup/photoprism-yyyy-mm-dd.sql.gz"]
+    container_name: photoprism-db-backup
+    depends_on:
+      - photoprism-db
+    volumes:
+      - "{{ base_path }}/photoprism/db/backup:/app/backup"
+    environment:
+      <<: *default-db-backup-env
+      MYSQL_HOST: "photoprism-db"
+      MYSQL_DATABASE: "{{ photoprism_mysql_database }}"
+      MYSQL_USER: "{{ photoprism_mysql_user }}"
+      MYSQL_PASSWORD: "{{ photoprism_mysql_password }}"
+    networks:
+      - photoprism
+
+  # rsync backup
+  rsync: &default-rsync
+    profiles: ["optional"]
+    build: rsync
+    container_name: rsync
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    volumes:
+      # backup target
+      - "{{ base_path }}/rsync:/app/backup"
+      # backup source
+      - /etc:/app/data/etc
+      - "{{ base_path }}:/app/data/base"
+    environment:
+      RSYNC_OPTIONS: "-av --exclude base/rsync --exclude base/borgbackup"
+    network_mode: "none"
+    labels: *disable-watchtower
+    <<: *defaults
+
+   # rsync external backup
+  rsync-ext:
+    <<: *default-rsync
+    container_name: rsync-ext
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    volumes:
+      # backup target
+      - "{{ external_media_path }}/rsync:/app/backup"
+      # backup source
+      - /etc:/app/data/etc
+      - "{{ base_path }}:/app/data/base"
+    environment:
+      RSYNC_OPTIONS: "-rDzv --exclude base/rsync"
+
+  ######################## STATUS ########################
+  # telegram server status
+  status:
+    build: status
+    container_name: status
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    volumes:
+      - "{{ base_path }}/status:/app/data"
+    environment:
+      TZ: "{{ timezone }}"
+      UPDATE_INTERVAL: "300"
+      BOT_ID: "{{ telegram_bot_id }}"
+      CHAT_ID: "{{ telegram_chat_id }}"
+      USER_ID: "{{ telegram_user_id }}"
+      DOMAINS: "{{ domains }}"
+      DDNS_DOMAINS: "{{ ddns_domains }}"
+    networks:
+      - status
+    labels: *disable-watchtower
+    <<: *defaults
+
+  ######################## BINANCE ########################
+  # crypto trading bot
+  # see https://github.com/edeng23/binance-trade-bot
+  binance: &default-binance
+    image: edeng23/binance-trade-bot
+    command: python -m binance_trade_bot
+    container_name: binance
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    working_dir: /app
+    volumes:
+      - "{{ base_path }}/binance/data:/app/data"
+      - "{{ base_path }}/binance/logs:/app/logs"
+      - "{{ base_path }}/binance/apprise.yml:/app/config/apprise.yml:ro"
+    environment:
+      CURRENT_COIN_SYMBOL: "{{ binance_current_coin }}"
+      BRIDGE_SYMBOL: "USDT"
+      TLD: "com"
+      HOURS_TO_KEEP_SCOUTING_HISTORY: "1"
+      USE_MARGIN: "no"
+      SCOUT_MULTIPLIER: "5"
+      SCOUT_MARGIN: "0.8"
+      SCOUT_SLEEP_TIME: "1"
+      STRATEGY: "default"
+      BUY_TIMEOUT: "20"
+      SELL_TIMEOUT: "20"
+      PYTHONUNBUFFERED: 1
+      API_KEY: "{{ binance_api_key }}"
+      API_SECRET_KEY: "{{ binance_api_secret_key }}"
+    networks:
+      - binance
+    <<: *defaults
+
+  # api for the bot (e.g., localhost:5123/api/trade_history)
+  # see https://github.com/edeng23/binance-trade-bot/blob/master/binance_trade_bot/api_server.py
+  binance-api:
+    <<: *default-binance
+    profiles: ["optional"]
+    container_name: binance-api
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    command: gunicorn binance_trade_bot.api_server:app -k eventlet -w 1 --threads 1 -b 0.0.0.0:5123
+    depends_on:
+      - binance
+    ports:
+      # only accessible from localhost
+      - "127.0.0.1:5123:5123"
+    restart: "no"
+
+  ######################## PROXY ########################
+  # nginx reverse proxy
+  proxy:
+    build: proxy
+    container_name: proxy
+    depends_on:
+      - proxy-companion
+    ports:
+      - "80:80"
+      - "443:443"
+    labels:
+      com.github.jrcs.letsencrypt_nginx_proxy_companion.nginx_proxy: ""
+      <<: *disable-watchtower
+    volumes:
+      - conf:/etc/nginx/conf.d
+      - vhost:/etc/nginx/vhost.d
+      - html:/usr/share/nginx/html
+      - dhparam:/etc/nginx/dhparam
+      - certs:/etc/nginx/certs:ro
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+    networks:
+      - proxy
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    <<: *defaults
+
+  ## let's encrypt companion for nginx
+  proxy-companion:
+    image: nginxproxy/acme-companion
+    container_name: proxy-companion
+    volumes:
+      - vhost:/etc/nginx/vhost.d
+      - html:/usr/share/nginx/html
+      - dhparam:/etc/nginx/dhparam:ro
+      - certs:/etc/nginx/certs
+      - acme:/etc/acme.sh
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      DEFAULT_EMAIL: "{{ default_mail }}"
+    networks:
+      - proxy
+    <<: *defaults
+
+  ######################## CLOUD ########################
+  # nextcloud DB
+  cloud-db:
+    image: mariadb
+    container_name: cloud-db
+    # see https://github.com/nextcloud/docker/issues/1492
+    command: --innodb-read-only-compressed=OFF --log-bin=ROW
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    volumes:
+      - "{{ base_path }}/cloud/db:/var/lib/mysql"
+    environment:
+      MYSQL_ROOT_PASSWORD: "{{ cloud_mysql_root_password }}"
+      MYSQL_DATABASE: "{{ cloud_mysql_database }}"
+      MYSQL_USER: "{{ cloud_mysql_user }}"
+      MYSQL_PASSWORD: "{{ cloud_mysql_password }}"
+    networks:
+      - cloud
+    <<: *defaults
+
+  # redis cache for nextcloud
+  cloud-redis:
+    image: redis
+    container_name: cloud-redis
+    # see https://github.com/docker-library/redis/issues/46
+    command: ["bash", "-c", 'docker-entrypoint.sh --requirepass "$$REDIS_HOST_PASSWORD"']
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    volumes:
+      - "{{ base_path }}/cloud/redis:/data"
+    environment:
+      REDIS_HOST_PASSWORD: "{{ cloud_redis_host_password }}"
+    networks:
+      - cloud
+    <<: *defaults
+
+  # nextcloud
+  cloud:
+    build: cloud
+    container_name: cloud
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    expose:
+      # port to be proxied
+      - "80"
+    depends_on:
+      - cloud-db
+      - cloud-redis
+    volumes:
+      - "{{ base_path }}/cloud/app:/var/www/html"
+      # external mounts
+      - "{{ base_path }}/data:/home/data"
+      - "{{ base_path }}/code:/home/code"
+      - "{{ base_path }}/docs:/home/docs"
+      - "{{ base_path }}/pics:/home/pics"
+      # https://github.com/nextcloud/docker/issues/763
+      - "{{ base_path }}/cloud/redis-session.ini:/usr/local/etc/php/conf.d/redis-session.ini"
+    environment:
+      REDIS_HOST: "cloud-redis"
+      MYSQL_HOST: "cloud-db"
+      # refer to a user by its number http://httpd.apache.org/docs/current/mod/mod_unixd.html#user
+      APACHE_RUN_USER: "#{{ docker_user.uid }}"
+      APACHE_RUN_GROUP: "#{{ docker_user.group }}"
+      # see https://github.com/nextcloud/docker/issues/742
+      OVERWRITEPROTOCOL: "https"
+      TZ: "{{ timezone }}"
+      NEXTCLOUD_TRUSTED_DOMAINS: "{{ cloud_domain }}"
+      NEXTCLOUD_ADMIN_USER: "{{ cloud_admin_user }}"
+      NEXTCLOUD_ADMIN_PASSWORD: "{{ cloud_admin_password }}"
+      REDIS_HOST_PASSWORD: "{{ cloud_redis_host_password }}"
+      MYSQL_DATABASE: "{{ cloud_mysql_database }}"
+      MYSQL_USER: "{{ cloud_mysql_user }}"
+      MYSQL_PASSWORD: "{{ cloud_mysql_password }}"
+      # mail smtp
+      SMTP_HOST: "{{ cloud_mail_smtphost }}"
+      SMTP_SECURE: "ssl"
+      SMTP_NAME: "{{ vault_cloud_mail_username }}"
+      SMTP_PASSWORD: "{{ vault_cloud_mail_password }}"
+      MAIL_FROM_ADDRESS: "{{ vault_cloud_mail_address.split("@")[0] }}"
+      MAIL_DOMAIN: "{{ vault_cloud_mail_address.split("@")[1] }}"
+      # proxy
+      VIRTUAL_HOST: "{{ cloud_domain }}"
+      LETSENCRYPT_HOST: "{{ cloud_domain }}"
+    networks:
+      - proxy
+      - cloud
+    labels: *disable-watchtower
+    <<: *defaults
+
+  ######################## PHOTOPRISM ########################
+  # photoprism DB
+  # see https://docs.photoprism.org/getting-started/docker-compose/
+  photoprism-db:
+    image: mariadb
+    container_name: photoprism-db
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    command: mysqld --transaction-isolation=READ-COMMITTED --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --max-connections=512 --innodb-rollback-on-timeout=OFF --innodb-lock-wait-timeout=120
+    volumes:
+      - "{{ base_path }}/photoprism/db:/var/lib/mysql"
+    environment:
+      MYSQL_ROOT_PASSWORD: "{{ photoprism_mysql_root_password }}"
+      MYSQL_DATABASE: "{{ photoprism_mysql_database }}"
+      MYSQL_USER: "{{ photoprism_mysql_user }}"
+      MYSQL_PASSWORD: "{{ photoprism_mysql_password }}"
+    networks:
+      - photoprism
+    <<: *defaults
+
+  # photoprism photo gallery
+  photoprism:
+    image: photoprism/photoprism
+    container_name: photoprism
+    user: "{{ docker_user.uid }}:{{ docker_user.group }}"
+    depends_on:
+      - photoprism-db
+    expose:
+      # port to be proxied
+      - "2342"
+    environment:
+      # see https://docs.photoprism.org/getting-started/config-options/
+      PHOTOPRISM_ORIGINALS_LIMIT: 5000
+      PHOTOPRISM_HTTP_COMPRESSION: "gzip"
+      PHOTOPRISM_DISABLE_CHOWN: "true"
+      PHOTOPRISM_DISABLE_WEBDAV: "true"
+      PHOTOPRISM_DETECT_NSFW: "true"
+      PHOTOPRISM_UPLOAD_NSFW: "true"
+      PHOTOPRISM_DATABASE_DRIVER: "mysql"
+      PHOTOPRISM_DATABASE_SERVER: "photoprism-db:3306"
+      PHOTOPRISM_DATABASE_NAME: photoprism
+      PHOTOPRISM_DATABASE_USER: photoprism-user
+      VIRTUAL_PORT: 2342
+      TZ: "{{ timezone }}"
+      PHOTOPRISM_ADMIN_PASSWORD: "{{ photoprism_admin_password }}"
+      PHOTOPRISM_DATABASE_NAME: "{{ photoprism_mysql_database }}"
+      PHOTOPRISM_DATABASE_USER: "{{ photoprism_mysql_user }}"
+      PHOTOPRISM_DATABASE_PASSWORD: "{{ photoprism_mysql_password }}"
+      # proxy
+      VIRTUAL_HOST: "{{ photoprism_domain }}"
+      LETSENCRYPT_HOST: "{{ photoprism_domain }}"
+    # Hardware devices for video transcoding and machine learning (optional):
+    # devices:
+    #  - "/dev/video11:/dev/video11" # Video4Linux (h264_v4l2m2m)
+    #  - "/dev/dri/card0:/dev/dri/card0"
+    volumes:
+      # The *originals* folder contains your original photo and video files (- "[host folder]:/photoprism/originals"):
+      # Multiple folders can be made accessible by mounting them as subfolders of /photoprism/originals:
+      - "{{ base_path }}/pics:/photoprism/originals"
+      # Cache, session, thumbnail, and sidecar files will be created in the *storage* folder (never remove):
+      - "{{ base_path }}/photoprism/app:/photoprism/storage"
+      # backups and token, see https://github.com/photoprism/photoprism/issues/1093
+      - "{{ base_path }}/photoprism/var:/var/lib/photoprism"
+    networks:
+      - proxy
+      - photoprism
+    <<: *defaults

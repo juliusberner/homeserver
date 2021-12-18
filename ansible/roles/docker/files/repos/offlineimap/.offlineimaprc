@@ -1,0 +1,21 @@
+[general]
+metadata = /app/offlineimap
+accounts = mail
+pythonfile = /app/credentials_from_env.py
+
+[Account mail]
+localrepository = Local
+remoterepository = Remote
+
+[Repository Local]
+type = Maildir
+localfolders = /app/mails
+sync_deletes = no
+
+[Repository Remote]
+type = IMAP
+remotehosteval = getcredentials("MAIL_HOST")
+remoteusereval = getcredentials("MAIL_USER")
+remotepasseval = getcredentials("MAIL_PW")
+sslcacertfile = OS-DEFAULT
+folderfilter = lambda foldername: foldername not in ['Trash']

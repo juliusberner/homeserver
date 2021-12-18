@@ -1,0 +1,10 @@
+#jinja2:variable_start_string:'[%' , variable_end_string:'%]'
+#!/bin/bash
+PS_FILE=[% base_path %]/status/docker-ps.txt
+STATS_FILE=[% base_path %]/status/docker-stats.txt
+OWNER=[% docker_user.name %]:[% docker_user.group %]
+
+docker ps -a --format='table {{.Names}}\t{{.Status}}' > $PS_FILE
+chown $OWNER $PS_FILE
+docker stats --no-stream --format='table {{.Name}}\t{{.CPUPerc}}\t{{.MemPerc}}' > $STATS_FILE
+chown $OWNER $STATS_FILE

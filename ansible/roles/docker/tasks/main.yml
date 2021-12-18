@@ -1,0 +1,319 @@
+---
+#################
+# prerequisites #
+#################
+
+- name: "[user] Register docker user"
+  user:
+    name: "{{ user_name }}"
+    group: "{{ user_group }}"
+    state: present
+    create_home: true
+  register: docker_user
+
+- name: "[apt_key] Add Docker GPG apt Key"
+  apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+
+- name: "[apt_repository] Add Docker repository"
+  apt_repository:
+    repo: deb https://download.docker.com/linux/ubuntu bionic stable
+
+- name: "[apt] Install requirements for docker"
+  apt:
+    name: "{{ apt_packages }}"
+    state: latest
+    update_cache: yes
+
+- name: "[pip] Install virtualenv"
+  pip:
+    name: virtualenv
+
+- name: "[pip] Install Docker modules for python"
+  pip:
+    name:
+      - docker
+      - docker-compose
+    virtualenv: "{{ docker_venv }}"
+
+
+#########
+# files #
+#########
+
+- name: "[file] Create directories with right permissions"
+  file:
+    path: "{{ base_path }}/{{ item }}"
+    state: directory
+    owner: "{{ docker_user.name }}"
+    group: "{{ docker_user.group }}"
+    mode: u=rwX,g=rwX,o=X
+  loop: "{{ user_dirs }}"
+
+- name: "[file] Create files with right permissions"
+  file:
+    path: "{{ base_path }}/{{ item }}"
+    state: touch
+    owner: "{{ docker_user.name }}"
+    group: "{{ docker_user.group }}"
+    mode: u=rw,g=rw,o=
+    modification_time: preserve
+    access_time: preserve
+  loop: "{{ user_files }}"
+
+- name: "[stat] Check if external media path exists"
+  stat:
+    path: "{{ external_media_path }}"
+  register: stat_external
+
+- name: "[file] Create external directories with right permissions"
+  file:
+    path: "{{ external_media_path }}/{{ item }}"
+    state: directory
+    owner: "{{ docker_user.name }}"
+    group: "{{ docker_user.group }}"
+    mode: u=rwX,g=rwX,o=X
+  loop: "{{ user_external_dirs }}"
+  when: stat_external.stat.exists and stat_external.stat.isdir
+
+- name: "[template] Apprise file"
+  template:
+    src: apprise.yml.j2
+    dest: "{{ base_path }}/binance/apprise.yml"
+    owner: "{{ docker_user.name }}"
+    group: "{{ docker_user.group }}"
+    mode: u=rw,g=rw,o=
+    backup: "{{ backup_conf }}"
+
+- name: "[file] Create docker and scripts directory"
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: u=rwX,g=X,o=X
+  loop:
+    - "{{ docker_path }}"
+    - "{{ scripts_path }}"
+
+- name: "[copy] Docker files"
+  copy:
+    src: repos/
+    dest: "{{ docker_path }}"
+    mode: u=rwX,g=X,o=X
+
+- name: "[template] Docker-compose file"
+  template:
+    src: docker-compose.yml.j2
+    dest: "{{ docker_path }}/docker-compose.yml"
+    backup: "{{ backup_conf }}"
+    mode: u=rwX,g=,o=
+
+- name: "[template] Scripts"
+  template:
+    src: "{{ item }}.j2"
+    dest: "{{ scripts_path }}/{{ item }}"
+    backup: "{{ backup_conf }}"
+    mode: u=rwx,g=,o=
+  loop:
+    - "docker_status.sh"
+    - "disk_usage.sh"
+
+- name: "[file] Create a symbolic link to docker-compose"
+  file:
+    src: "{{ docker_venv }}/bin/docker-compose"
+    dest: /usr/local/sbin/docker-compose
+    state: link
+
+- name: "[template] Docker-compose systemd service"
+  template:
+    src: "docker-compose.service.j2"
+    dest: "/etc/systemd/system/docker-compose.service"
+    backup: "{{ backup_conf }}"
+    mode: u=rw,g=r,o=r
+  notify: "[systemd] Reload daemon"
+
+- name: "[meta] Flush handlers"
+  meta: flush_handlers
+
+
+##################
+# docker-compose #
+##################
+
+- name: "[docker_network] Create networks"
+  community.docker.docker_network:
+    name: "{{ item }}"
+  loop: "{{ docker_networks }}"
+  vars:
+    ansible_python_interpreter: "{{ docker_venv }}/bin/python"
+
+- name: "[docker_compose] Up"
+  community.docker.docker_compose:
+    project_src: "{{ docker_path }}"
+  vars:
+    ansible_python_interpreter: "{{ docker_venv }}/bin/python"
+
+- name: "[systemd] Start and enable docker-compose service"
+  systemd:
+    name: docker-compose
+    state: started
+    enabled: yes
+  ignore_errors: "{{ test }}"
+
+- name: "[uri] Wait for domains"
+  uri:
+    url: "https://{{ item }}"
+    status_code: 200
+  register: result
+  until: result.status == 200
+  retries: 18
+  delay: 10
+  loop:
+    - "{{ cloud_domain }}"
+    - "{{ photoprism_domain }}"
+  ignore_errors: "{{ test }}"
+
+
+########
+# cron #
+########
+
+- name: "[cron] Populate crontab"
+  cron:
+    name: "{{ item.name }}"
+    minute: "{{ item.minute | default ('*') }}"
+    hour: "{{ item.hour | default ('*') }}"
+    day: "{{ item.day | default ('*') }}"
+    # see https://askubuntu.com/questions/222512/cron-info-no-mta-installed-discarding-output-error-in-the-syslog
+    job: "{{ item.job }} 2>&1 | logger -t {{ item.name }}"
+    user: "{{ item.user | default ('root') }}"
+    backup: "{{ backup_conf }}"
+  loop: "{{ cron_jobs }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+
+###########
+## config #
+###########
+
+- name: "[copy] Data"
+  copy:
+    src: data/
+    dest: "{{ base_path }}"
+    owner: "{{ docker_user.name }}"
+    group: "{{ docker_user.group }}"
+    mode: u=rwX,g=rwX,o=X
+    force: no
+
+- name: "[docker_container_exec] Config docker containers"
+  block:
+    - name: "[docker_container_exec] Index files"
+      community.docker.docker_container_exec:
+        container: "cloud"
+        argv:
+          - "php"
+          - "occ"
+          - "files:scan"
+          - "{{ cloud_admin_user }}"
+      changed_when: False
+
+    - name: "[docker_container_exec] Enable cloud apps"
+      community.docker.docker_container_exec:
+        container: "cloud"
+        argv:
+          - "php"
+          - "occ"
+          - "app:enable"
+          - "{{ item }}"
+      register: cmd_result
+      changed_when:
+          - '"already enabled" not in cmd_result.stdout'
+      loop: "{{ cloud_apps_enable }}"
+
+    - name: "[docker_container_exec] Disable cloud apps"
+      community.docker.docker_container_exec:
+        container: "cloud"
+        argv:
+          - "php"
+          - "occ"
+          - "app:disable"
+          - "{{ item }}"
+      register: cmd_result
+      changed_when:
+          - '"No such app enabled" not in cmd_result.stdout'
+      loop: "{{ cloud_apps_disable }}"
+
+    - name: "[docker_container_exec] Read cloud admin settings"
+      community.docker.docker_container_exec:
+        container: "cloud"
+        argv:
+          - "php"
+          - "occ"
+          - "user:setting"
+          - "{{ cloud_admin_user }}"
+          - "settings"
+          - "--output=json"
+      register: cloud_admin_settings
+      changed_when: False
+
+    - name: "[docker_container_exec] Change cloud admin mail"
+      community.docker.docker_container_exec:
+        container: "cloud"
+        argv:
+          - "php"
+          - "occ"
+          - "user:setting"
+          - "{{ cloud_admin_user }}"
+          - "settings"
+          - "email"
+          - "{{ default_mail }}"
+      when:
+        - "cloud_admin_settings.stdout|from_json|json_query('settings.email') != default_mail"
+
+    - name: "[docker_container_exec] Read nextcloud external mount points"
+      community.docker.docker_container_exec:
+        container: "cloud"
+        argv:
+          - "php"
+          - "occ"
+          - "files_external:list"
+          - "--output=json"
+      register: cloud_external_mnt
+      changed_when: False
+
+    - name: "[docker_container_exec] Create nextcloud external mount points"
+      community.docker.docker_container_exec:
+        container: "cloud"
+        argv:
+          - "php"
+          - "occ"
+          - "files_external:create"
+          - "-c"
+          - "datadir=/home/{{ item }}"
+          - "{{ item }}"
+          - "local"
+          - "null::null"
+      when:
+        - "item not in cloud_external_mnt.stdout|from_json|json_query('[*].mount_point')"
+      loop:
+        - "/docs"
+        - "/code"
+        - "/pics"
+        - "/data"
+
+    - name: "[docker_container_exec] Index photoprism"
+      community.docker.docker_container_exec:
+        container: "photoprism"
+        argv:
+          - "photoprism"
+          - "index"
+          - "--cleanup"
+      register: cmd_result
+      changed_when: False
+
+  vars:
+    ansible_python_interpreter: "{{ docker_venv }}/bin/python"
+
+- name: "[command] Pause playbook for testing"
+  command: "tail -f /dev/null"
+  when: test

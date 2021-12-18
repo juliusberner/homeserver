@@ -1,0 +1,1 @@
+# Data in this folder will be copied to {{ base_path }} as specified in ansible/roles/docker/defaults/main.yml

@@ -1,0 +1,8 @@
+# ansible
+ansible/group_vars/all/vault.yml
+ansible/hosts.yml
+ansible/roles/docker/files/data/*
+!ansible/roles/docker/files/data/example.txt
+
+# pycharm
+.idea

@@ -1,0 +1,219 @@
+---
+############
+# Packages #
+############
+
+- name: "[apt_repository] Add repositories"
+  apt_repository:
+    repo: "{{ item }}"
+  loop: "{{ apt_repos }}"
+
+- name: "[apt] Update and upgrade"
+  apt:
+    upgrade: yes
+    update_cache: yes
+
+- name: "[apt] Install Prerequisites"
+  apt:
+    name: aptitude
+    state: latest
+    force_apt_get: yes
+
+- name: "[apt] Install packages"
+  apt:
+    name: "{{ apt_packages }}"
+    state: latest
+
+- name: "[package_facts] Gather facts"
+  package_facts:
+    manager: auto
+
+- name: "[command] Attach the ubuntu advantage client"
+  command: ua attach "{{ ubuntu_advantage_token }}"
+  no_log: true
+  when: "'ubuntu-advantage-tools' in ansible_facts.packages"
+  register: cmd_result
+  failed_when:
+    - cmd_result.rc > 0
+    - '"already attached" not in cmd_result.stderr'
+  changed_when: cmd_result.rc == 0
+
+- name: "[command] Enable ubuntu livepatch"
+  command: ua enable livepatch
+  when: "'ubuntu-advantage-tools' in ansible_facts.packages"
+  register: cmd_result
+  failed_when:
+    - cmd_result.rc > 0
+    - '"already enabled" not in cmd_result.stdout'
+  changed_when: cmd_result.rc == 0
+
+
+#######
+# ssh #
+#######
+
+- name: "[group] Create group for server users"
+  group:
+    name: "{{ user_group }}"
+    state: present
+
+- name: "[user] Register admin"
+  user:
+    name: "{{ admin_name }}"
+    append: yes
+    groups: "{{ user_group }}"
+    state: present
+    create_home: true
+  register: admin_user
+
+- name: "[authorized_key] Configure authorized_keys"
+  authorized_key:
+    user: "{{ admin_user.name }}"
+    key: "{{ ssh_local_key }}"
+
+- name: "[lineinfile] Change sshd config"
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^[#\s]*{{ item.key }}(?!\S)'
+    line: "{{ item.key }} {{ item.value }}"
+    backup: "{{ backup_conf }}"
+  loop: "{{ sshd_config | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  notify: "[service] Reload sshd"
+
+
+#######
+# ufw #
+#######
+
+- name: "[ufw] Enable"
+  ufw:
+    state: enabled
+
+- name: "[ufw] Enable ufw logging"
+  ufw:
+    logging: on
+  notify: "[service] Restart ufw"
+
+- name: "[ufw] Limit SSH connections"
+  ufw:
+    rule: limit
+    name: OpenSSH
+  notify: "[service] Restart ufw"
+
+- name: "[ufw] Deny all other incoming traffic"
+  ufw:
+    policy: deny
+    direction: incoming
+  notify: "[service] Restart ufw"
+
+- name: "[lineinfile] Disable ping"
+  lineinfile:
+    path: /etc/ufw/before.rules
+    regexp: '^[#\s]*-A ufw-before-input.*icmp-type {{ item }}'
+    line: "-A ufw-before-input -p icmp --icmp-type {{ item }} -j DROP"
+    insertbefore: '^\s*COMMIT'
+    backup: "{{ backup_conf }}"
+  loop:
+    - destination-unreachable
+    - source-quench
+    - time-exceeded
+    - parameter-problem
+    - echo-request
+  notify: "[service] Restart ufw"
+
+- name: "[lineinfile] Disable ipv6 ping"
+  lineinfile:
+    path: /etc/ufw/before6.rules
+    regexp: '^[#\s]*-A ufw6-before-input.*icmpv6-type {{ item }}'
+    line: "-A ufw6-before-input -p icmpv6 --icmpv6-type {{ item }} -j DROP"
+    insertbefore: '^\s*COMMIT'
+    backup: "{{ backup_conf }}"
+  loop:
+    - destination-unreachable
+    - packet-too-big
+    - time-exceeded
+    - parameter-problem
+    - echo-request
+  notify: "[service] Restart ufw"
+
+
+####################
+# power management #
+####################
+
+- name: "[service_facts] Populate service facts"
+  service_facts:
+
+- name: "[lineinfile] Configure tlp"
+  lineinfile:
+    dest: /etc/tlp.conf
+    regexp: '^[#\s]*{{ item.key }}\s*='
+    line: "{{ item.key }}={{ item.value }}"
+    backup: "{{ backup_conf }}"
+  loop: "{{ tlp_config | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  notify: "[service] Restart tlp"
+
+- name: "[service] Start and enable tlp"
+  service:
+    name: tlp
+    state: started
+    enabled: true
+  ignore_errors: "{{ test }}"
+
+- name: "[lineinfile] Change logind config"
+  lineinfile:
+    path: /etc/systemd/logind.conf
+    regexp: '^[#\s]*{{ item.key }}\s*='
+    line: "{{ item.key }}={{ item.value }}"
+    backup: "{{ backup_conf }}"
+  loop: "{{ logind_config | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  notify: "[service] Restart logind"
+  when: "'systemd-logind.service' in ansible_facts.services"
+
+- name: "[systemd] Disable suspend and sleep"
+  systemd:
+    name: "{{ item }}"
+    masked: true
+  loop:
+    - sleep.target
+    - suspend.target
+    - hibernate.target
+    - hybrid-sleep.target
+  notify: "[systemd] Reload daemon"
+
+
+###########
+# scripts #
+###########
+
+- name: "[file] Create scripts directory"
+  file:
+    path: "{{ scripts_path }}"
+    state: directory
+    mode: u=rwX,g=X,o=X
+
+- name: "[copy] Scripts"
+  copy:
+    src: files/
+    dest: "{{ scripts_path }}"
+    mode: u=rwx,g=X,o=X
+
+- name: "[cron] Populate crontab"
+  cron:
+    name: "{{ item.name }}"
+    minute: "{{ item.minute | default ('*') }}"
+    hour: "{{ item.hour | default ('*') }}"
+    day: "{{ item.day | default ('*') }}"
+    # see https://askubuntu.com/questions/222512/cron-info-no-mta-installed-discarding-output-error-in-the-syslog
+    job: "{{ item.job }} 2>&1 | logger -t {{ item.name }}"
+    user: "{{ item.user | default ('root') }}"
+    backup: "{{ backup_conf }}"
+  loop: "{{ cron_jobs }}"
+  loop_control:
+    label: "{{ item.name }}"

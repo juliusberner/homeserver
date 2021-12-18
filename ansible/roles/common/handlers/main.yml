@@ -1,0 +1,28 @@
+---
+- name: "[service] Reload sshd"
+  service:
+    name: ssh
+    state: reloaded
+  ignore_errors: "{{ test }}"
+
+- name: "[service] Restart ufw"
+  service:
+    name: ufw
+    state: restarted
+  ignore_errors: "{{ test }}"
+
+- name: "[service] Restart tlp"
+  service:
+    name: tlp
+    state: restarted
+  ignore_errors: "{{ test }}"
+
+- name: "[service] Restart logind"
+  service:
+    name: systemd-logind
+    state: restarted
+
+- name: "[systemd] Reload daemon"
+  systemd:
+    daemon_reload: yes
+  ignore_errors: "{{ test }}"
